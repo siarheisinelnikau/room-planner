@@ -77,7 +77,7 @@ impl SoftwarePainter {
                     .ceil()
                     .clamp(0.0, height as f32) as usize,
             ];
-            for triangle in mesh.indices.chunks_exact(3) {
+            for triangle in mesh.indices.as_chunks::<3>().0 {
                 let mut v = [
                     mesh.vertices[triangle[0] as usize],
                     mesh.vertices[triangle[1] as usize],

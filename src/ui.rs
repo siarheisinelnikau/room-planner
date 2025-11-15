@@ -598,7 +598,7 @@ impl Workspace {
         style.visuals.window_fill = self.surface();
         style.visuals.selection.bg_fill = self.accent();
         style.visuals.selection.stroke = Stroke::new(
-            1.0,
+            1.0_f32,
             if self.settings.theme == Theme::Dark {
                 Color32::from_rgb(10, 42, 34)
             } else {
@@ -1224,7 +1224,7 @@ impl Workspace {
             let outward = Point::new(u.y, -u.x);
             let from = self.screen(a + outward * (d.room.thickness + 0.22), rect);
             let to = self.screen(b + outward * (d.room.thickness + 0.22), rect);
-            painter.line_segment([from, to], Stroke::new(1.0, self.muted()));
+            painter.line_segment([from, to], Stroke::new(1.0_f32, self.muted()));
             for p in [from, to] {
                 painter.circle_filled(p, 2.0, self.muted());
             }
@@ -1248,7 +1248,7 @@ impl Workspace {
                     self.canvas()
                 },
                 Stroke::new(
-                    if selected { 2.0 } else { 1.0 },
+                    if selected { 2.0_f32 } else { 1.0_f32 },
                     if selected {
                         self.accent()
                     } else {
@@ -1260,7 +1260,10 @@ impl Workspace {
                 let swing = geometry::door_swing(&d.room, o);
                 let mut path: Vec<_> = swing.iter().map(|&p| self.screen(p, rect)).collect();
                 path.push(path[0]);
-                painter.add(egui::Shape::line(path, Stroke::new(1.3, self.warning())));
+                painter.add(egui::Shape::line(
+                    path,
+                    Stroke::new(1.3_f32, self.warning()),
+                ));
             }
         }
         for f in &d.furniture {
@@ -1280,7 +1283,7 @@ impl Workspace {
                 corners.to_vec(),
                 fill,
                 Stroke::new(
-                    if selected { 2.5 } else { 1.2 },
+                    if selected { 2.5_f32 } else { 1.2_f32 },
                     if bad { self.warning() } else { self.accent() },
                 ),
             ));
@@ -1311,7 +1314,7 @@ impl Workspace {
                     f.center + Point::new(0.0, -f.depth / 2.0).rotate(f.angle),
                     rect,
                 );
-                painter.line_segment([start, handle], Stroke::new(1.2, self.accent()));
+                painter.line_segment([start, handle], Stroke::new(1.2_f32, self.accent()));
                 painter.circle_filled(handle, 5.5, self.accent());
             }
         }
@@ -1335,7 +1338,7 @@ impl Workspace {
             if let Some(pos) = response.hover_pos() {
                 path.push(self.screen(self.snapped(self.world(pos, rect), None, disabled), rect));
             }
-            painter.add(egui::Shape::line(path, Stroke::new(2.0, self.accent())));
+            painter.add(egui::Shape::line(path, Stroke::new(2.0_f32, self.accent())));
             for &p in &self.draw_points {
                 painter.circle_filled(self.screen(p, rect), 5.0, self.accent());
             }
@@ -1365,7 +1368,7 @@ impl Workspace {
             let x = self.screen(Point::new(i as f64 * step, 0.0), rect).x;
             painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                Stroke::new(0.7, color),
+                Stroke::new(0.7_f32, color),
             );
             if i % 2 == 0 {
                 painter.text(
@@ -1381,7 +1384,7 @@ impl Workspace {
             let y = self.screen(Point::new(0.0, i as f64 * step), rect).y;
             painter.line_segment(
                 [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                Stroke::new(0.7, color),
+                Stroke::new(0.7_f32, color),
             );
             if i % 2 == 0 {
                 painter.text(
@@ -1401,7 +1404,7 @@ impl Workspace {
                     self.screen(f.center + a.rotate(f.angle), rect),
                     self.screen(f.center + b.rotate(f.angle), rect),
                 ],
-                Stroke::new(1.0, self.accent().gamma_multiply(0.7)),
+                Stroke::new(1.0_f32, self.accent().gamma_multiply(0.7)),
             );
         };
         match f.kind {
