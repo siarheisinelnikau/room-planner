@@ -1,0 +1,33 @@
+name: Publish RoomPlanner
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: room-planner-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Run synthetic regression tests
+        run: cargo test --locked --all-targets -j 2
+      - name: Run static analysis
+        run: cargo clippy --locked --all-targets -j 2 -- -D warnings
+      - name: Build and verify portable package
+        run: ./scripts/Package.ps1
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/Publish-Release.ps1
