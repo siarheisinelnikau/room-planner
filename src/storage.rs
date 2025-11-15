@@ -79,18 +79,20 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
+    let mut created = false;
     let result = (|| -> io::Result<()> {
         let mut f = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
+        created = true;
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
         replace_file(&temp, path)?;
         Ok(())
     })();
-    if result.is_err() {
+    if result.is_err() && created {
         let _ = fs::remove_file(&temp);
     }
     result.map_err(|e| e.to_string())
