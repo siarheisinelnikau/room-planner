@@ -6,3 +6,6 @@
 !.env.example
 /.test-output/
 *.log
+*.roomplan
+*.roomplan.bak
+*.roomplan.tmp-*
