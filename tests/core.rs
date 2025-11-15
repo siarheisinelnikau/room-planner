@@ -478,3 +478,89 @@ fn scene_scales_with_edited_room_and_wall_thickness() {
     near(min, -0.3);
     near(max, 6.3);
 }
+
+#[test]
+fn thick_walls_cannot_fold_across_a_narrow_notch() {
+    let d = Document {
+        room: Room {
+            vertices: vec![
+                Point::new(0.0, 0.0),
+                Point::new(5.0, 0.0),
+                Point::new(5.0, 5.0),
+                Point::new(2.6, 5.0),
+                Point::new(2.6, 2.0),
+                Point::new(2.4, 2.0),
+                Point::new(2.4, 5.0),
+                Point::new(0.0, 5.0),
+            ],
+            thickness: 0.15,
+            height: 2.7,
+        },
+        ..Default::default()
+    };
+    assert!(geometry::validate_polygon(&d.room.vertices));
+    assert_eq!(geometry::validate(&d), Err(ValidationError::Wall));
+}
+#[test]
+fn concave_miter_requires_space_before_an_opening() {
+    let mut e = Editor::new(Document {
+        room: Room::l_shape(),
+        ..Default::default()
+    });
+    assert!(e.add_opening(OpeningKind::Door, 3, 0.05).is_err());
+    assert!(e.add_opening(OpeningKind::Door, 3, 0.25).is_ok());
+}
+#[test]
+fn exact_door_check_detects_arc_crossing_without_rectangle_corner_inside() {
+    let d = Document::sample();
+    let door = &d.openings[0];
+    let theta = 46.875_f64.to_radians();
+    let radial = Point::new(theta.cos(), theta.sin());
+    let mut f = Furniture::new(
+        5,
+        FurnitureKind::Cabinet,
+        Point::new(0.5, 0.0) + radial * (0.9 + 0.05 - 0.00005),
+    );
+    f.width = 0.1;
+    f.depth = 0.1;
+    f.angle = theta;
+    assert!(geometry::blocks_door(&d.room, door, &f));
+    assert!(!geometry::convex_overlap(
+        &f.corners(),
+        &geometry::door_swing(&d.room, door)
+    ));
+}
+#[test]
+fn every_parametric_object_stays_inside_its_declared_bounds() {
+    for kind in FurnitureKind::ALL {
+        let mut d = with_furniture();
+        d.furniture[0].kind = kind;
+        d.furniture[0].angle = 1.17;
+        let s = Scene::from_document(&d);
+        let f = &d.furniture[0];
+        for v in s
+            .triangles
+            .iter()
+            .filter(|t| t.object == Some(f.id))
+            .flat_map(|t| t.vertices)
+        {
+            let p = f.local(Point::new(v.x, v.z));
+            assert!(p.x.abs() <= f.width / 2.0 + EPS);
+            assert!(p.y.abs() <= f.depth / 2.0 + EPS);
+            assert!(v.y >= -EPS && v.y <= f.height + EPS);
+        }
+    }
+}
+#[test]
+fn xml_control_characters_and_zero_id_allocator_are_rejected() {
+    let d = Document {
+        title: "bad\0title".into(),
+        ..Default::default()
+    };
+    assert!(geometry::validate(&d).is_err());
+    let d = Document {
+        next_id: 0,
+        ..Default::default()
+    };
+    assert!(geometry::validate(&d).is_err());
+}

@@ -275,7 +275,7 @@ impl Scene {
                     );
                     scene.part(
                         f,
-                        Point::new(0.0, -f.depth * 0.505),
+                        Point::new(0.0, -f.depth * 0.49),
                         0.015,
                         f.depth * 0.015,
                         f.height * 0.05,
