@@ -50,6 +50,7 @@ struct Application {
     state: Option<WindowState>,
     proxy: EventLoopProxy<UserEvent>,
     startup_marker: Option<PathBuf>,
+    reopen: Option<PathBuf>,
     error: Option<String>,
 }
 impl WindowState {
@@ -166,9 +167,14 @@ impl ApplicationHandler<UserEvent> for Application {
             );
             input.init_accesskit(event_loop, &window, self.proxy.clone());
             let proxy = self.proxy.clone();
-            let workspace = Workspace::new(Arc::new(move || {
+            let mut workspace = Workspace::new(Arc::new(move || {
                 let _ = proxy.send_event(UserEvent::Wake);
             }));
+            if let Some(path) = self.reopen.take()
+                && let Err(error) = workspace.open_path(path)
+            {
+                workspace.report_open_error(error);
+            }
             Ok(WindowState {
                 window,
                 _software_context: software_context,
@@ -332,6 +338,11 @@ fn main() -> Result<(), String> {
         state: None,
         proxy: event_loop.create_proxy(),
         startup_marker,
+        reopen: args
+            .iter()
+            .position(|arg| arg == "--reopen")
+            .and_then(|i| args.get(i + 1))
+            .map(PathBuf::from),
         error: None,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
