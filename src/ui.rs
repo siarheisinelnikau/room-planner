@@ -175,6 +175,9 @@ impl Workspace {
     pub fn report_open_error(&mut self, error: String) {
         self.error("io_error", error);
     }
+    pub fn diagnostic_three_view(&mut self) {
+        self.view = View::Three;
+    }
     fn t(&self, key: &str) -> &'static str {
         self.settings.language.text(key)
     }

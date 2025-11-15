@@ -122,5 +122,7 @@
   "recovery_saved": "Proyecto recuperado guardado",
   "update_restart": "La aplicación se reiniciará. Guarde primero los cambios del proyecto.",
   "licenses": "Licencias de componentes",
-  "restart_install": "Reiniciar e instalar"
+  "restart_install": "Reiniciar e instalar",
+  "startup_failed": "RoomPlanner no pudo iniciarse. Los detalles siguientes pueden ayudar a identificar la causa.",
+  "error_log": "Registro de diagnóstico"
 }
