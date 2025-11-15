@@ -5,6 +5,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: write
+  statuses: write
 concurrency:
   group: room-planner-release-${{ github.ref }}
   cancel-in-progress: false
