@@ -16,6 +16,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Report release progress
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: context.sha, state: 'pending',
+              context: 'RoomPlanner release', description: 'Building and verifying Windows release',
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -31,3 +40,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/Publish-Release.ps1
+      - name: Report release result
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          RELEASE_RESULT: ${{ job.status }}
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              ...context.repo, sha: context.sha,
+              state: process.env.RELEASE_RESULT === 'success' ? 'success' : 'failure',
+              context: 'RoomPlanner release', description: `Release job ${process.env.RELEASE_RESULT}`,
+              target_url: `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`
+            });
