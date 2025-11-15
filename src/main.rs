@@ -1,6 +1,11 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-use room_planner::{software::SoftwarePainter, ui::Workspace, updates};
+use room_planner::{
+    diagnostics::{self, Counters, Session},
+    software::SoftwarePainter,
+    ui::Workspace,
+    updates,
+};
 use std::{
     num::NonZeroU32,
     path::PathBuf,
@@ -26,14 +31,6 @@ impl From<egui_winit::accesskit_winit::Event> for UserEvent {
         Self::Access(event)
     }
 }
-#[derive(Default)]
-struct Counters {
-    layouts: u64,
-    rasters: u64,
-    presents: u64,
-    raster_micros: u64,
-    present_micros: u64,
-}
 struct WindowState {
     window: Arc<Window>,
     _software_context: softbuffer::Context<Arc<Window>>,
@@ -52,6 +49,7 @@ struct Application {
     startup_marker: Option<PathBuf>,
     reopen: Option<PathBuf>,
     error: Option<String>,
+    diagnostic: Option<Session>,
 }
 impl WindowState {
     fn visible(&self) -> bool {
@@ -136,6 +134,8 @@ impl ApplicationHandler<UserEvent> for Application {
                 event_loop
                     .create_window(
                         Window::default_attributes()
+                            // AccessKit must subclass the HWND before its first visible state.
+                            .with_visible(false)
                             .with_title("RoomPlanner")
                             .with_inner_size(LogicalSize::new(1280.0, 820.0))
                             .with_min_inner_size(LogicalSize::new(1060.0, 680.0))
@@ -167,9 +167,26 @@ impl ApplicationHandler<UserEvent> for Application {
             );
             input.init_accesskit(event_loop, &window, self.proxy.clone());
             let proxy = self.proxy.clone();
-            let mut workspace = Workspace::new(Arc::new(move || {
+            let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                 let _ = proxy.send_event(UserEvent::Wake);
-            }));
+            });
+            let mut workspace = if self.diagnostic.is_some() {
+                let mut workspace = Workspace::with_settings(
+                    room_planner::settings::Settings {
+                        startup_updates: false,
+                        reduced_motion: true,
+                        ..Default::default()
+                    },
+                    Arc::new(updates::Https),
+                    wake,
+                );
+                workspace
+                    .editor
+                    .replace(room_planner::model::Document::sample());
+                workspace
+            } else {
+                Workspace::new(wake)
+            };
             if let Some(path) = self.reopen.take()
                 && let Err(error) = workspace.open_path(path)
             {
@@ -190,8 +207,13 @@ impl ApplicationHandler<UserEvent> for Application {
         })();
         match result {
             Ok(state) => {
-                state.window.request_redraw();
                 self.state = Some(state);
+                if let Some(diagnostic) = &mut self.diagnostic {
+                    diagnostic.started = Instant::now();
+                }
+                let state = self.state.as_ref().unwrap();
+                state.window.set_visible(true);
+                state.window.request_redraw();
             }
             Err(error) => {
                 self.error = Some(error);
@@ -291,8 +313,38 @@ impl ApplicationHandler<UserEvent> for Application {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         };
+        if let Some(diagnostic) = &mut self.diagnostic
+            && diagnostic.due()
+        {
+            match diagnostic.phase {
+                0 => diagnostic.snapshot("plan_idle_start", &state.counters),
+                1 => {
+                    diagnostic.snapshot("plan_idle_end", &state.counters);
+                    state.window.set_visible(false);
+                }
+                2 => {
+                    diagnostic.snapshot("hidden_end", &state.counters);
+                    state.window.set_visible(true);
+                    state.workspace.diagnostic_three_view();
+                    state.schedule(Instant::now());
+                }
+                3 => diagnostic.snapshot("three_idle_start", &state.counters),
+                4 => {
+                    diagnostic.snapshot("three_idle_end", &state.counters);
+                    if let Err(error) = diagnostic.save() {
+                        self.error = Some(error);
+                    }
+                    event_loop.exit();
+                }
+                _ => {}
+            }
+            diagnostic.phase += 1;
+        }
+        let diagnostic_deadline = self.diagnostic.as_ref().and_then(Session::deadline);
         if !state.visible() {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            event_loop.set_control_flow(
+                diagnostic_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            );
             return;
         }
         match state.deadline {
@@ -301,8 +353,12 @@ impl ApplicationHandler<UserEvent> for Application {
                 state.window.request_redraw();
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
-            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(deadline)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
+            Some(deadline) => event_loop.set_control_flow(ControlFlow::WaitUntil(
+                diagnostic_deadline.map_or(deadline, |d| d.min(deadline)),
+            )),
+            None => event_loop.set_control_flow(
+                diagnostic_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+            ),
         }
     }
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -320,7 +376,7 @@ impl ApplicationHandler<UserEvent> for Application {
         }
     }
 }
-fn main() -> Result<(), String> {
+fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| a == "--apply-update") {
         let path = args.get(1).ok_or("Missing update manifest")?;
@@ -344,11 +400,45 @@ fn main() -> Result<(), String> {
             .and_then(|i| args.get(i + 1))
             .map(PathBuf::from),
         error: None,
+        diagnostic: diagnostics::diagnostic_directory(&args)?
+            .map(Session::new)
+            .transpose()?,
     };
     event_loop.run_app(&mut app).map_err(|e| e.to_string())?;
     if let Some(error) = app.error {
         Err(error)
     } else {
         Ok(())
+    }
+}
+fn main() {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let directory = diagnostics::diagnostic_directory(&args).ok().flatten();
+    diagnostics::initialize_error_reporting(
+        directory
+            .as_ref()
+            .map(|p| p.join("startup-error.log"))
+            .unwrap_or_else(diagnostics::default_error_path),
+    );
+    if let Err(error) = run() {
+        let log = diagnostics::write_failure(&error).ok();
+        eprintln!("RoomPlanner could not start: {error}");
+        if directory.is_none() {
+            let language = room_planner::settings::Settings::load()
+                .unwrap_or_default()
+                .language;
+            let description = format!(
+                "{}\n\n{error}{}",
+                language.text("startup_failed"),
+                log.map(|p| format!("\n\n{}: {}", language.text("error_log"), p.display()))
+                    .unwrap_or_default()
+            );
+            rfd::MessageDialog::new()
+                .set_title("RoomPlanner")
+                .set_description(description)
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+        }
+        std::process::exit(1);
     }
 }

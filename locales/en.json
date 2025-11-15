@@ -122,5 +122,7 @@
   "recovery_saved": "Recovered project saved",
   "update_restart": "The app will restart. Save any project changes first.",
   "licenses": "Third-party licenses",
-  "restart_install": "Restart and install"
+  "restart_install": "Restart and install",
+  "startup_failed": "RoomPlanner could not start. The details below can help identify the cause.",
+  "error_log": "Diagnostic log"
 }
