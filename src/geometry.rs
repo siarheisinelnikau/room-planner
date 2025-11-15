@@ -446,3 +446,57 @@ pub fn snap(d: &Document, p: Point, grid: f64, tolerance: f64, exclude: Option<I
     }
     out
 }
+
+/// Align furniture edges with inner walls and other furniture while retaining a metric grid.
+pub fn snap_placement(
+    d: &Document,
+    f: &Furniture,
+    center: Point,
+    grid: f64,
+    tolerance: f64,
+) -> Point {
+    let mut candidate = f.clone();
+    candidate.center = Point::new(
+        (center.x / grid).round() * grid,
+        (center.y / grid).round() * grid,
+    );
+    let mut targets: Vec<_> = (0..d.room.vertices.len()).map(|i| d.room.edge(i)).collect();
+    for other in d.furniture.iter().filter(|other| other.id != f.id) {
+        let c = other.corners();
+        for i in 0..4 {
+            targets.push((c[i], c[(i + 1) % 4]));
+        }
+    }
+    let mut dx: Option<f64> = None;
+    let mut dy: Option<f64> = None;
+    let mut diagonal: Option<Point> = None;
+    for (a, b) in targets {
+        let length = a.distance(b);
+        let direction = (b - a) / length;
+        let normal = Point::new(-direction.y, direction.x);
+        for point in candidate.corners() {
+            let projection = (point - a).dot(direction);
+            let distance = (point - a).dot(normal);
+            if projection < -EPS || projection > length + EPS || distance.abs() > tolerance {
+                continue;
+            }
+            let shift = normal * (-distance);
+            if normal.x.abs() > 0.999999 {
+                if dx.is_none_or(|old| shift.x.abs() < old.abs()) {
+                    dx = Some(shift.x);
+                }
+            } else if normal.y.abs() > 0.999999 {
+                if dy.is_none_or(|old| shift.y.abs() < old.abs()) {
+                    dy = Some(shift.y);
+                }
+            } else if diagonal.is_none_or(|old| shift.length() < old.length()) {
+                diagonal = Some(shift);
+            }
+        }
+    }
+    if dx.is_some() || dy.is_some() {
+        candidate.center + Point::new(dx.unwrap_or(0.0), dy.unwrap_or(0.0))
+    } else {
+        candidate.center + diagonal.unwrap_or_default()
+    }
+}

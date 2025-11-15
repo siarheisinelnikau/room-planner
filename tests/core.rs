@@ -564,3 +564,33 @@ fn xml_control_characters_and_zero_id_allocator_are_rejected() {
     };
     assert!(geometry::validate(&d).is_err());
 }
+
+#[test]
+fn furniture_edge_snaps_to_inner_wall_instead_of_putting_its_center_in_the_wall() {
+    let d = with_furniture();
+    let f = &d.furniture[0];
+    let center = geometry::snap_placement(&d, f, Point::new(0.73, 2.0), 0.1, 0.08);
+    let mut moved = f.clone();
+    moved.center = center;
+    near(moved.corners()[0].x, 0.0);
+    assert!(
+        moved
+            .corners()
+            .iter()
+            .all(|&p| geometry::contains(&d.room.vertices, p))
+    );
+}
+#[test]
+fn rotated_furniture_edges_snap_to_a_matching_rotated_object() {
+    let mut d = with_furniture();
+    d.furniture[0].angle = 0.4;
+    let original = d.furniture[0].clone();
+    let mut moving = original.clone();
+    moving.id = 2;
+    moving.center = original.center + Point::new(original.width + 0.02, 0.0).rotate(original.angle);
+    d.furniture.push(moving.clone());
+    d.next_id = 3;
+    let center = geometry::snap_placement(&d, &moving, moving.center, 0.001, 0.05);
+    let along = (center - original.center).rotate(-original.angle);
+    near(along.x, original.width);
+}
