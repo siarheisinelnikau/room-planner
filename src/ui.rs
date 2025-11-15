@@ -12,7 +12,7 @@ use egui::{
 };
 use std::{
     path::PathBuf,
-    sync::{Arc, mpsc},
+    sync::{Arc, LazyLock, mpsc},
     time::Instant,
 };
 
@@ -51,6 +51,15 @@ struct PreviewCache {
     selected: Option<Id>,
     texture: egui::TextureHandle,
 }
+static LICENSE_LINES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    concat!(
+        include_str!("../LICENSE"),
+        "\n\n",
+        include_str!("../THIRD_PARTY_LICENSES.txt")
+    )
+    .lines()
+    .collect()
+});
 
 pub struct Workspace {
     pub editor: Editor,
@@ -60,6 +69,7 @@ pub struct Workspace {
     view: View,
     tool: Tool,
     settings_open: bool,
+    licenses_open: bool,
     shape_open: bool,
     import_open: bool,
     import_text: String,
@@ -81,6 +91,7 @@ pub struct Workspace {
     sender: mpsc::Sender<updates::State>,
     receiver: mpsc::Receiver<updates::State>,
     wake: Arc<dyn Fn() + Send + Sync>,
+    transport: Arc<dyn updates::Transport>,
     scene_cache: Option<(u64, Scene)>,
     image_cache: Option<PreviewCache>,
     check_cache: (u64, Vec<geometry::Issue>),
@@ -92,6 +103,15 @@ impl Workspace {
             Ok(s) => (s, None),
             Err(e) => (Settings::default(), Some(("settings_load_error", e))),
         };
+        let mut workspace = Self::with_settings(settings, Arc::new(updates::Https), wake);
+        workspace.notice = settings_error;
+        workspace
+    }
+    pub fn with_settings(
+        settings: Settings,
+        transport: Arc<dyn updates::Transport>,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         let document = Document::default();
         let camera = Camera::fit(&document);
         let (sender, receiver) = mpsc::channel();
@@ -103,6 +123,7 @@ impl Workspace {
             view: View::Plan,
             tool: Tool::Select,
             settings_open: false,
+            licenses_open: false,
             shape_open: false,
             import_open: false,
             import_text: String::new(),
@@ -119,11 +140,12 @@ impl Workspace {
             room_width: 5.0,
             room_depth: 4.0,
             wall_length: 0.0,
-            notice: settings_error,
+            notice: None,
             update: updates::State::Idle,
             sender,
             receiver,
             wake,
+            transport,
             scene_cache: None,
             image_cache: None,
             check_cache: (u64::MAX, vec![]),
@@ -136,6 +158,22 @@ impl Workspace {
     }
     pub fn request_close(&mut self) {
         self.request(Pending::Close);
+    }
+    pub fn open_path(&mut self, path: PathBuf) -> Result<(), String> {
+        let loaded = storage::load_document(&path)?;
+        self.editor.replace(loaded.document);
+        self.path = if loaded.recovered { None } else { Some(path) };
+        self.reset_view();
+        if loaded.recovered {
+            self.error("recovered", "");
+        }
+        Ok(())
+    }
+    pub fn update_state(&self) -> &updates::State {
+        &self.update
+    }
+    pub fn report_open_error(&mut self, error: String) {
+        self.error("io_error", error);
     }
     fn t(&self, key: &str) -> &'static str {
         self.settings.language.text(key)
@@ -174,23 +212,14 @@ impl Workspace {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter(self.t("project"), &["roomplan"])
                     .pick_file()
+                    && let Err(e) = self.open_path(path)
                 {
-                    match storage::load_document(&path) {
-                        Ok(loaded) => {
-                            self.editor.replace(loaded.document);
-                            self.path = if loaded.recovered { None } else { Some(path) };
-                            self.reset_view();
-                            if loaded.recovered {
-                                self.error("recovered", "");
-                            }
-                        }
-                        Err(e) => self.error("io_error", e),
-                    }
+                    self.error("io_error", e);
                 }
             }
             Pending::Install => {
                 if let updates::State::Ready(path) = &self.update {
-                    match updates::launch_helper(path) {
+                    match updates::launch_helper(path, self.path.clone()) {
                         Ok(()) => self.close_requested = true,
                         Err(e) => {
                             self.update = updates::State::Failed {
@@ -250,7 +279,7 @@ impl Workspace {
             }
         }
     }
-    fn check_updates(&mut self) {
+    pub fn check_updates(&mut self) {
         if matches!(
             self.update,
             updates::State::Checking | updates::State::Downloading { .. }
@@ -260,8 +289,9 @@ impl Workspace {
         self.update = updates::State::Checking;
         let sender = self.sender.clone();
         let wake = self.wake.clone();
+        let transport = self.transport.clone();
         std::thread::spawn(move || {
-            let state = match updates::check(&updates::Https) {
+            let state = match updates::check(transport.as_ref()) {
                 Ok(Some(a)) => updates::State::Available(a),
                 Ok(None) => updates::State::Current,
                 Err(detail) => updates::State::Failed {
@@ -280,11 +310,12 @@ impl Workspace {
         };
         let sender = self.sender.clone();
         let wake = self.wake.clone();
+        let transport = self.transport.clone();
         std::thread::spawn(move || {
             let result = std::env::current_exe()
                 .map_err(|e| e.to_string())
                 .and_then(|target| {
-                    updates::download(&updates::Https, &available, &target, &mut |received| {
+                    updates::download(transport.as_ref(), &available, &target, &mut |received| {
                         let _ = sender.send(updates::State::Downloading {
                             received,
                             total: available.asset.size,
@@ -545,6 +576,7 @@ impl Workspace {
                 }
             });
         self.settings_window(ctx);
+        self.licenses_window(ctx);
         self.shape_window(ctx);
         self.import_window(ctx);
         self.unsaved_window(ctx);
@@ -562,7 +594,14 @@ impl Workspace {
         style.visuals.panel_fill = self.surface();
         style.visuals.window_fill = self.surface();
         style.visuals.selection.bg_fill = self.accent();
-        style.visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
+        style.visuals.selection.stroke = Stroke::new(
+            1.0,
+            if self.settings.theme == Theme::Dark {
+                Color32::from_rgb(10, 42, 34)
+            } else {
+                Color32::WHITE
+            },
+        );
         style.visuals.hyperlink_color = self.accent();
         style.visuals.text_cursor.blink = false;
         style.spacing.item_spacing = egui::vec2(8.0, 8.0);
@@ -573,6 +612,9 @@ impl Workspace {
         } else {
             0.08
         };
+        if self.settings.reduced_motion {
+            style.scroll_animation = egui::style::ScrollAnimation::none();
+        }
         style
             .text_styles
             .insert(egui::TextStyle::Body, FontId::proportional(14.0));
@@ -663,8 +705,30 @@ impl Workspace {
         if delete {
             self.delete();
         }
-        if finish && self.tool == Tool::Draw {
-            self.finish_drawing();
+        if finish {
+            match self.tool {
+                Tool::Draw => self.finish_drawing(),
+                Tool::Furniture(kind) => {
+                    let (min, max) = scene::bounds(&self.editor.document.room.vertices);
+                    if let Err(e) = self.editor.add_furniture(kind, (min + max) / 2.0) {
+                        self.error("invalid_geometry", e);
+                    } else {
+                        self.tool = Tool::Select;
+                    }
+                }
+                Tool::Opening(kind) => {
+                    if let Some(Selection::Wall(wall)) = self.editor.selection {
+                        let (a, b) = self.editor.document.room.edge(wall);
+                        let offset = (a.distance(b) / 2.0 - 0.6).max(0.05);
+                        if let Err(e) = self.editor.add_opening(kind, wall, offset) {
+                            self.error("invalid_geometry", e);
+                        } else {
+                            self.tool = Tool::Select;
+                        }
+                    }
+                }
+                Tool::Select => {}
+            }
         }
     }
     fn delete(&mut self) {
@@ -724,6 +788,45 @@ impl Workspace {
         let t = |key| language.text(key);
         let units = self.draft.units;
         ui.heading(t("properties"));
+        ui.label(t("selection"));
+        let mut selected = self.editor.selection;
+        let selection_text = selection_name(selected, &self.editor.document, language);
+        egui::ComboBox::from_id_salt("selection")
+            .width(ui.available_width())
+            .selected_text(selection_text)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut selected, None, t("room"));
+                for f in &self.editor.document.furniture {
+                    ui.selectable_value(
+                        &mut selected,
+                        Some(Selection::Furniture(f.id)),
+                        format!("{} #{}", t(furniture_key(f.kind)), f.id),
+                    );
+                }
+                for o in &self.editor.document.openings {
+                    ui.selectable_value(
+                        &mut selected,
+                        Some(Selection::Opening(o.id)),
+                        format!("{} #{}", t(opening_key(o.kind)), o.id),
+                    );
+                }
+                for i in 0..self.editor.document.room.vertices.len() {
+                    ui.selectable_value(
+                        &mut selected,
+                        Some(Selection::Wall(i)),
+                        format!("{} {}", t("wall"), i + 1),
+                    );
+                    ui.selectable_value(
+                        &mut selected,
+                        Some(Selection::Vertex(i)),
+                        format!("{} {}", t("corner"), i + 1),
+                    );
+                }
+            });
+        if selected != self.editor.selection {
+            self.editor.selection = selected;
+            self.sync_draft();
+        }
         ui.add_space(10.0);
         let selection = self.editor.selection;
         match selection {
@@ -1152,7 +1255,8 @@ impl Workspace {
             ));
             if o.kind == OpeningKind::Door {
                 let swing = geometry::door_swing(&d.room, o);
-                let path: Vec<_> = swing.iter().map(|&p| self.screen(p, rect)).collect();
+                let mut path: Vec<_> = swing.iter().map(|&p| self.screen(p, rect)).collect();
+                path.push(path[0]);
                 painter.add(egui::Shape::line(path, Stroke::new(1.3, self.warning())));
             }
         }
@@ -1447,8 +1551,18 @@ impl Workspace {
                 mut original,
                 start,
             } => {
-                original.center =
-                    self.snapped(original.center + p - start, Some(original.id), disabled);
+                let center = original.center + p - start;
+                original.center = if self.settings.snap && !disabled {
+                    geometry::snap_placement(
+                        &self.editor.document,
+                        &original,
+                        center,
+                        self.settings.grid,
+                        8.0 / self.zoom,
+                    )
+                } else {
+                    center
+                };
                 self.editor.apply(|d| {
                     if let Some(f) = d.furniture.iter_mut().find(|f| f.id == original.id) {
                         *f = original;
@@ -1694,7 +1808,7 @@ impl Workspace {
                     }
                     updates::State::Ready(_) => {
                         ui.label(t("update_restart"));
-                        if ui.button(t("download_install")).clicked() {
+                        if ui.button(t("restart_install")).clicked() {
                             self.request(Pending::Install);
                         }
                     }
@@ -1707,6 +1821,9 @@ impl Workspace {
                 }
                 ui.add_space(12.0);
                 ui.small(t("shortcuts"));
+                if ui.button(t("licenses")).clicked() {
+                    self.licenses_open = true;
+                }
                 if ui.button(t("done")).clicked() {
                     self.settings_open = false;
                 }
@@ -1715,6 +1832,28 @@ impl Workspace {
         if old != self.settings {
             self.persist_settings();
         }
+    }
+    fn licenses_window(&mut self, ctx: &egui::Context) {
+        if !self.licenses_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new(self.t("licenses"))
+            .open(&mut open)
+            .default_size(egui::vec2(700.0, 450.0))
+            .show(ctx, |ui| {
+                egui::ScrollArea::both().show_rows(ui, 16.0, LICENSE_LINES.len(), |ui, range| {
+                    for i in range {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(LICENSE_LINES[i]).monospace().size(12.0),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                        );
+                    }
+                });
+            });
+        self.licenses_open = open;
     }
     fn shape_window(&mut self, ctx: &egui::Context) {
         if !self.shape_open {
@@ -1818,11 +1957,13 @@ impl Workspace {
     }
 }
 fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, units: Units, min: f64, max: f64) {
-    ui.horizontal(|ui| {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 3.0;
         ui.label(label);
         let mut display = units.display(*value);
         if ui
-            .add(
+            .add_sized(
+                [ui.available_width(), 28.0],
                 egui::DragValue::new(&mut display)
                     .speed(0.01 * units.factor())
                     .range(units.display(min)..=units.display(max))
@@ -1834,6 +1975,32 @@ fn number(ui: &mut egui::Ui, label: &str, value: &mut f64, units: Units, min: f6
             *value = units.from_display(display);
         }
     });
+}
+fn selection_name(selection: Option<Selection>, d: &Document, language: Language) -> String {
+    let t = |key| language.text(key);
+    match selection {
+        Some(Selection::Furniture(id)) => format!(
+            "{} #{}",
+            d.furniture
+                .iter()
+                .find(|f| f.id == id)
+                .map(|f| t(furniture_key(f.kind)))
+                .unwrap_or(t("selection")),
+            id
+        ),
+        Some(Selection::Opening(id)) => format!(
+            "{} #{}",
+            d.openings
+                .iter()
+                .find(|o| o.id == id)
+                .map(|o| t(opening_key(o.kind)))
+                .unwrap_or(t("selection")),
+            id
+        ),
+        Some(Selection::Wall(i)) => format!("{} {}", t("wall"), i + 1),
+        Some(Selection::Vertex(i)) => format!("{} {}", t("corner"), i + 1),
+        None => t("room").to_owned(),
+    }
 }
 pub fn furniture_key(kind: FurnitureKind) -> &'static str {
     match kind {

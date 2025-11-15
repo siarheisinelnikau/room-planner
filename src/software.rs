@@ -16,7 +16,7 @@ impl SoftwarePainter {
     pub fn update(&mut self, delta: &TexturesDelta) -> Result<(), String> {
         for (id, change) in &delta.set {
             let egui::ImageData::Color(image) = &change.image;
-            if image.size[0] > 8192 || image.size[1] > 8192 {
+            if image.size.contains(&0) || image.size[0] > 8192 || image.size[1] > 8192 {
                 return Err("Texture exceeds software renderer limit".into());
             }
             if let Some([x, y]) = change.pos {

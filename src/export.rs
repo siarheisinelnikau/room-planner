@@ -77,7 +77,8 @@ pub fn svg(d: &Document) -> Result<String, String> {
         )
         .unwrap();
         if o.kind == OpeningKind::Door {
-            let p = geometry::door_swing(&d.room, o);
+            let mut p = geometry::door_swing(&d.room, o);
+            p.push(p[0]);
             write!(
                 out,
                 "<polyline points=\"{}\" fill=\"none\" stroke=\"#9b754d\" stroke-width=\"1.5\"/>",

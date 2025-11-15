@@ -186,6 +186,9 @@ fn expected_hash(available: &Available, transport: &dyn Transport) -> Result<Str
             .checksum
             .as_ref()
             .ok_or("The release has no SHA-256 integrity information")?;
+        if !official(checksum, &available.version) {
+            return Err("Invalid official checksum URL".into());
+        }
         let bytes = transport.bytes(&checksum.browser_download_url, 4096, &mut |_| {})?;
         let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
         let fields: Vec<_> = text.split_whitespace().collect();
@@ -223,6 +226,8 @@ pub struct InstallManifest {
     pub backup: PathBuf,
     pub hash: String,
     pub parent_pid: u32,
+    #[serde(default)]
+    pub reopen: Option<PathBuf>,
 }
 pub fn download(
     transport: &dyn Transport,
@@ -245,7 +250,14 @@ pub fn download(
     validate_executable(&bytes)?;
     let target = target.canonicalize().map_err(|e| e.to_string())?;
     let parent = target.parent().ok_or("Invalid installation path")?;
-    let directory = parent.join(format!(".roomplanner-update-{}", std::process::id()));
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    let directory = parent.join(format!(
+        ".roomplanner-update-{}-{nonce}",
+        std::process::id()
+    ));
     fs::create_dir(&directory).map_err(|e| e.to_string())?;
     let staged = directory.join("verified.exe");
     storage::atomic_write(&staged, &bytes)?;
@@ -257,12 +269,16 @@ pub fn download(
         staged,
         hash,
         parent_pid: std::process::id(),
+        reopen: None,
     };
     let path = directory.join("install.json");
     storage::save_json(&path, &manifest)?;
     Ok(path)
 }
-pub fn launch_helper(manifest: &Path) -> Result<(), String> {
+pub fn launch_helper(manifest: &Path, reopen: Option<PathBuf>) -> Result<(), String> {
+    let mut plan: InstallManifest = storage::read_json(manifest, 16 * 1024)?;
+    plan.reopen = reopen;
+    storage::save_json(manifest, &plan)?;
     let directory = manifest.parent().ok_or("Invalid update directory")?;
     std::process::Command::new(directory.join("helper.exe"))
         .arg("--apply-update")
@@ -323,15 +339,21 @@ pub fn apply_update(path: &Path) -> Result<(), String> {
     }
     storage::replace_file(&m.target, &m.backup).map_err(|e| e.to_string())?;
     if let Err(error) = storage::replace_file(&m.staged, &m.target) {
-        let _ = storage::replace_file(&m.backup, &m.target);
+        if let Err(recovery) = storage::replace_file(&m.backup, &m.target) {
+            return Err(format!(
+                "{error}; restoration failed: {recovery}. The previous executable is preserved at {}",
+                m.backup.display()
+            ));
+        }
         return Err(error.to_string());
     }
     let marker = path.with_extension("started");
-    match std::process::Command::new(&m.target)
-        .arg("--update-ready")
-        .arg(&marker)
-        .spawn()
-    {
+    let mut command = std::process::Command::new(&m.target);
+    command.arg("--update-ready").arg(&marker);
+    if let Some(project) = &m.reopen {
+        command.arg("--reopen").arg(project);
+    }
+    match command.spawn() {
         Ok(mut child) => {
             // A successful first presentation acknowledges startup. Keep the old binary for recovery.
             for _ in 0..100 {
@@ -340,7 +362,11 @@ pub fn apply_update(path: &Path) -> Result<(), String> {
                 }
                 if child.try_wait().map_err(|e| e.to_string())?.is_some() {
                     storage::replace_file(&m.backup, &m.target).map_err(|e| e.to_string())?;
-                    let _ = std::process::Command::new(&m.target).spawn();
+                    let mut old = std::process::Command::new(&m.target);
+                    if let Some(project) = &m.reopen {
+                        old.arg("--reopen").arg(project);
+                    }
+                    let _ = old.spawn();
                     return Err(
                         "The update exited before startup; the previous version was restored"
                             .into(),
@@ -352,7 +378,11 @@ pub fn apply_update(path: &Path) -> Result<(), String> {
         }
         Err(e) => {
             storage::replace_file(&m.backup, &m.target).map_err(|r| r.to_string())?;
-            let _ = std::process::Command::new(&m.target).spawn();
+            let mut old = std::process::Command::new(&m.target);
+            if let Some(project) = &m.reopen {
+                old.arg("--reopen").arg(project);
+            }
+            let _ = old.spawn();
             Err(e.to_string())
         }
     }

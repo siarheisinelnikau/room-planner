@@ -151,3 +151,58 @@ fn verified_payload_is_staged_without_touching_installation() {
     assert_eq!(std::fs::read(&target).unwrap(), b"old");
     assert!(!m.backup.exists());
 }
+
+#[test]
+fn disabling_startup_checks_makes_no_request_but_manual_check_still_works() {
+    use room_planner::{settings::Settings, ui::Workspace};
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+    let transport = Arc::new(Fake {
+        requests: AtomicUsize::new(0),
+        bytes: b"[]".to_vec(),
+    });
+    let (sender, receiver) = mpsc::channel();
+    let mut workspace = Workspace::with_settings(
+        Settings {
+            startup_updates: false,
+            ..Default::default()
+        },
+        transport.clone(),
+        Arc::new(move || {
+            let _ = sender.send(());
+        }),
+    );
+    assert!(matches!(workspace.update_state(), updates::State::Idle));
+    assert_eq!(transport.requests.load(Ordering::Relaxed), 0);
+    workspace.check_updates();
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    workspace.poll_jobs();
+    assert_eq!(transport.requests.load(Ordering::Relaxed), 1);
+    assert!(matches!(workspace.update_state(), updates::State::Current));
+}
+#[test]
+fn default_startup_check_runs_as_a_background_job_with_fake_transport() {
+    use room_planner::{settings::Settings, ui::Workspace};
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+    let transport = Arc::new(Fake {
+        requests: AtomicUsize::new(0),
+        bytes: b"[]".to_vec(),
+    });
+    let (sender, receiver) = mpsc::channel();
+    let mut workspace = Workspace::with_settings(
+        Settings::default(),
+        transport.clone(),
+        Arc::new(move || {
+            let _ = sender.send(());
+        }),
+    );
+    receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    workspace.poll_jobs();
+    assert_eq!(transport.requests.load(Ordering::Relaxed), 1);
+    assert!(matches!(workspace.update_state(), updates::State::Current));
+}
