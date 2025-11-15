@@ -85,9 +85,11 @@ pub fn validate(d: &Document) -> Result<(), ValidationError> {
         return Err(Format);
     }
     if d.title.len() > 256
+        || d.title.chars().any(char::is_control)
         || d.furniture.len() > 500
         || d.openings.len() > 256
         || d.next_id == u64::MAX
+        || d.next_id == 0
     {
         return Err(Limit);
     }
@@ -96,6 +98,32 @@ pub fn validate(d: &Document) -> Result<(), ValidationError> {
     }
     if !bounded(d.room.thickness, 0.05, 1.0) || !bounded(d.room.height, 1.0, 10.0) {
         return Err(Wall);
+    }
+    let outer = outer_corners(&d.room);
+    for i in 0..outer.len() {
+        let (a, b) = d.room.edge(i);
+        if !outer[i].finite() || (outer[(i + 1) % outer.len()] - outer[i]).dot(b - a) <= EPS {
+            return Err(Wall);
+        }
+        for j in i + 1..outer.len() {
+            if j != i + 1
+                && !(i == 0 && j == outer.len() - 1)
+                && segments_intersect(
+                    outer[i],
+                    outer[(i + 1) % outer.len()],
+                    outer[j],
+                    outer[(j + 1) % outer.len()],
+                )
+            {
+                return Err(Wall);
+            }
+        }
+        for j in 0..outer.len() {
+            let (p, q) = d.room.edge(j);
+            if segments_intersect(outer[i], outer[(i + 1) % outer.len()], p, q) {
+                return Err(Wall);
+            }
+        }
     }
     let mut ids = HashSet::new();
     for o in &d.openings {
@@ -107,9 +135,14 @@ pub fn validate(d: &Document) -> Result<(), ValidationError> {
         }
         let (a, b) = d.room.edge(o.wall);
         let len = a.distance(b);
+        let u = (b - a) / len;
+        let start_clearance = (outer[o.wall] - a).dot(u).max(0.0) + 0.05;
+        let end_clearance = (b - outer[(o.wall + 1) % outer.len()]).dot(u).max(0.0) + 0.05;
         if !bounded(o.offset, 0.05, len)
             || !bounded(o.width, 0.1, len)
             || o.offset + o.width > len - 0.05 + EPS
+            || o.offset < start_clearance - EPS
+            || o.offset + o.width > len - end_clearance + EPS
             || !bounded(o.bottom, 0.0, d.room.height)
             || !bounded(o.height, 0.1, d.room.height)
             || o.bottom + o.height > d.room.height + EPS
@@ -260,6 +293,48 @@ pub fn door_swing(room: &Room, o: &Opening) -> Vec<Point> {
     p
 }
 
+/// Exact intersection with the swept quarter disk; display tessellation is not used for checks.
+pub fn blocks_door(room: &Room, o: &Opening, f: &Furniture) -> bool {
+    let (a, b) = room.edge(o.wall);
+    let u = (b - a) / a.distance(b);
+    let inward = Point::new(-u.y, u.x);
+    let hinge = a + u * (o.offset + if o.hinge_at_end { o.width } else { 0.0 });
+    let along = u * if o.hinge_at_end { -1.0 } else { 1.0 };
+    let points = f
+        .corners()
+        .map(|p| Point::new((p - hinge).dot(along), (p - hinge).dot(inward)));
+    let r = o.width;
+    let in_sector = |p: Point| p.x >= -EPS && p.y >= -EPS && p.dot(p) <= r * r + EPS;
+    if points.iter().copied().any(in_sector) || f.contains(hinge) {
+        return true;
+    }
+    for i in 0..4 {
+        let p = points[i];
+        let q = points[(i + 1) % 4];
+        let v = q - p;
+        if segments_intersect(p, q, Point::default(), Point::new(r, 0.0))
+            || segments_intersect(p, q, Point::default(), Point::new(0.0, r))
+        {
+            return true;
+        }
+        let aa = v.dot(v);
+        let bb = 2.0 * p.dot(v);
+        let cc = p.dot(p) - r * r;
+        let discriminant = bb * bb - 4.0 * aa * cc;
+        if discriminant >= 0.0 {
+            for t in [
+                (-bb - discriminant.sqrt()) / (2.0 * aa),
+                (-bb + discriminant.sqrt()) / (2.0 * aa),
+            ] {
+                if (0.0..=1.0).contains(&t) && in_sector(p + v * t) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IssueKind {
     Overlap,
@@ -316,7 +391,7 @@ pub fn checks(d: &Document) -> Vec<Issue> {
             }
         }
         for door in d.openings.iter().filter(|o| o.kind == OpeningKind::Door) {
-            if convex_overlap(&corners, &door_swing(&d.room, door)) {
+            if blocks_door(&d.room, door, f) {
                 issues.push(Issue {
                     kind: IssueKind::DoorSwing,
                     object: f.id,
